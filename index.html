@@ -203,6 +203,14 @@ label.lbl { display: grid; gap: 4px; font-size: .74rem; font-family: var(--label
   display: flex; align-items: flex-start; gap: 8px; background: #fff; border: 2px solid var(--ink);
   border-radius: 12px; padding: 7px 8px; min-width: 0;
 }
+.task.movable { user-select: none; -webkit-user-select: none; cursor: grab; }
+.task.dragging { opacity: .35; }
+.task.ghost { width: auto; }
+.task .grip { width: 26px; height: 30px; box-shadow: none; }
+@media (hover: hover) and (pointer: fine) { .task .grip { display: none; } }
+[data-drop] { transition: box-shadow .12s, transform .12s; }
+.list-panel.over, .event-block.over { transform: scale(1.02); box-shadow: 0 0 0 4px var(--hot), 7px 7px 0 var(--ink); }
+.focus.over { box-shadow: 0 0 0 4px var(--lemon), 7px 7px 0 var(--hot); }
 .task .txt { flex: 1; min-width: 0; overflow-wrap: anywhere; padding-top: 4px; }
 .task .where { display: block; font-family: var(--label); font-size: .56rem; letter-spacing: .08em; color: var(--ink-soft); margin-top: 2px; }
 .task.done .txt { text-decoration: line-through; text-decoration-thickness: 2px; text-decoration-color: var(--hot); opacity: .7; }
@@ -267,7 +275,7 @@ textarea.field { resize: vertical; min-height: 70px; }
   </header>
 
   <!-- TODAY -->
-  <section class="panel focus" aria-labelledby="focus-h">
+  <section class="panel focus" aria-labelledby="focus-h" data-drop="focus">
     <div class="section-head"><h2 id="focus-h">Today's Mission Critical Tasks</h2><span class="kicker" id="focusDate"></span></div>
     <div class="meter-row"><div class="meter" aria-hidden="true"><div id="meterFill"></div></div><span class="meter-label" id="meterLabel">0 / 0</span></div>
     <div id="focusList" style="display:grid;gap:8px"></div>
@@ -486,10 +494,10 @@ textarea.field { resize: vertical; min-height: 70px; }
   }
 
   // ---------- Drag (mouse anywhere on card, touch via the grip) ----------
-  function colAt(x, y) { const e = document.elementFromPoint(x, y); return e ? e.closest(".col") : null; }
-  function enableDrag(card, d) {
+  function enableDrag(card, sel, onDrop) {
+    const colAt = (x, y) => { const e = document.elementFromPoint(x, y); return e ? e.closest(sel) : null; };
     card.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || e.target.closest("button:not(.grip)")) return;
+      if (e.button !== 0 || e.target.closest("button:not(.grip), input")) return;
       if (e.pointerType !== "mouse" && !e.target.closest(".grip")) return;
       const sx = e.clientX, sy = e.clientY, rect = card.getBoundingClientRect();
       let ghost = null, over = null;
@@ -509,7 +517,7 @@ textarea.field { resize: vertical; min-height: 70px; }
         if (!ghost) return;
         ghost.remove(); card.classList.remove("dragging"); if (over) over.classList.remove("over");
         const c = ev.type === "pointerup" ? colAt(ev.clientX, ev.clientY) : null;
-        if (c) moveDeal(d, c.dataset.stage, c);
+        if (c) onDrop(c);
       };
       addEventListener("pointermove", move, { passive: false }); addEventListener("pointerup", up); addEventListener("pointercancel", up);
     });
@@ -552,7 +560,7 @@ textarea.field { resize: vertical; min-height: 70px; }
         edit.addEventListener("click", () => openEdit(d));
         right.append(edit, delButton("deal:" + d.id, "Delete deal", () => store.remove("deals", d.id)));
         row.append(left, right); c.append(row);
-        enableDrag(c, d); cards.append(c);
+        enableDrag(c, ".col", (col) => moveDeal(d, col.dataset.stage, col)); cards.append(c);
       }
       col.append(head, cards); p.append(col);
     });
@@ -578,7 +586,23 @@ textarea.field { resize: vertical; min-height: 70px; }
       star.addEventListener("click", () => toggleFocus(t)); row.append(star);
     }
     if (!(opts && opts.noDelete)) row.append(delButton("task:" + t.id, "Delete task", () => store.remove("tasks", t.id)));
+    if (!t.done) {
+      const grip = el("button", "icon-btn grip", "⠿"); grip.type = "button"; grip.title = "Drag to another list"; grip.setAttribute("aria-label", "Drag to another list");
+      row.prepend(grip);
+      row.classList.add("movable");
+      enableDrag(row, "[data-drop]", (target) => moveTask(t, target.dataset.drop));
+    }
     return row;
+  }
+
+  function moveTask(t, where) {
+    if (where === "focus") { if (t.focus !== todayKey()) toggleFocus(t); return; }
+    let patch;
+    if (where.startsWith("ev:")) { const evId = where.slice(3); if (t.list === "events" && t.eventId === evId) return; patch = { list: "events", eventId: evId }; }
+    else { const listId = where.slice(5); if (t.list === listId) return; patch = { list: listId, eventId: null }; }
+    Object.assign(t, patch); store.update("tasks", t.id, patch); render();
+    const name = listName(t);
+    flash("Moved to " + (name.startsWith("EVENT · ") ? name.slice(8) : name) + " ✿");
   }
 
   function renderFocus() {
@@ -601,6 +625,7 @@ textarea.field { resize: vertical; min-height: 70px; }
     box.replaceChildren();
     for (const l of LISTS) {
       const panel = el("section", "panel list-panel");
+      if (l.id !== "events") panel.dataset.drop = "list:" + l.id;
       const open = S.tasks.filter((t) => t.list === l.id && !t.done).sort(byCreated);
       const head = el("div", "lp-head"); head.style.background = l.color;
       head.append(el("h2", null, l.name), el("span", "count-pill", String(open.length)));
@@ -622,7 +647,7 @@ textarea.field { resize: vertical; min-height: 70px; }
         const evs = S.events.slice().sort(byCreated);
         if (S.loaded.events && !evs.length) body.append(el("div", "empty", "No events yet. Name one above, then add tasks to it."));
         for (const ev of evs) {
-          const blk = el("div", "event-block");
+          const blk = el("div", "event-block"); blk.dataset.drop = "ev:" + ev.id;
           const eh = el("div", "event-head"); eh.append(el("h3", null, ev.name));
           const tasks = open.filter((t) => t.eventId === ev.id);
           eh.append(delButton("event:" + ev.id, "Remove event and its tasks", () => {
